@@ -142,6 +142,7 @@ pub(crate) fn apply(s: &mut Session, p: &Value) -> Result<Value> {
     if id == effects::CROP_MARKS && params.get("style").is_none() {
         params["style"] = json!(s.crop_mark_style().id());
     }
+    effects::check_params(id, &params).map_err(|e| bad(C, e))?;
     let effect = effects::new_effect(id, &params).ok_or_else(|| bad(C, format!("unknown effect `{id}`")))?;
     let label = effects::effect_info(id).map(|e| e.label.trim_end_matches('…').to_string()).unwrap_or_default();
     if let Some(loose) = loose_for_pathfinder(s, p, id)? {
@@ -292,6 +293,9 @@ fn set_params(s: &mut Session, p: &Value) -> Result<Value> {
     for id in appearance_targets(s, p)? {
         let n = s.doc()?.doc.node(id).ok_or(EngineError::NoNode(id))?;
         let target = item.effects_item(&n.appearance, C)?;
+        if let Some(e) = n.appearance.effects_at(target).and_then(|fx| fx.get(index)) {
+            effects::check_params(&e.id, &params).map_err(|e| bad(C, e))?;
+        }
         if let Some(e) = n.appearance.effects_at(target).and_then(|fx| fx.get(index))
             && effects::is_three_d(&e.id)
             && visible != Some(false)

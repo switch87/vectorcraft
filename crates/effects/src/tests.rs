@@ -382,3 +382,21 @@ fn bench_catalog_lookup() {
     }
     eprintln!("10k lookups: {:?} ({n})", t.elapsed());
 }
+
+/// #1592: every catalogue entry's own defaults pass the check, and what the effect doesn't take
+/// is refused: unknown keys, wrong types, out-of-range values.
+#[test]
+fn effect_params_are_checked() {
+    for e in effect_catalog() {
+        assert_eq!(check_params(e.id, &e.defaults), Ok(()), "{}'s defaults", e.id);
+    }
+    let bad = |id: &str, p: serde_json::Value| check_params(id, &p).unwrap_err();
+    assert!(bad("blur.gaussian", json!({"blurr": 3})).contains("no parameter `blurr`"));
+    assert!(bad("blur.gaussian", json!({"radius": "big"})).contains("must be a number"));
+    assert!(bad("stylize.dropShadow", json!({"opacity": 500})).contains("0..100"));
+    assert!(bad("threeD.revolve", json!({"segments": 100000})).contains("8..128"));
+    assert_eq!(check_params("stylize.dropShadow", &json!({"opacity": 40, "x": -3, "color": "#ff0000"})), Ok(()));
+    // Keys only the description names (no default) are accepted.
+    assert_eq!(check_params("path.outlineStroke", &json!({"width": 2})), Ok(()));
+    assert_eq!(check_params("plugin.anything", &json!({"whatever": 1})), Ok(()), "plug-ins aren't checked here");
+}

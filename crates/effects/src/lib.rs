@@ -665,6 +665,92 @@ pub fn new_effect(id: &str, params: &Value) -> Option<Effect> {
     Some(Effect { id: id.to_string(), params: merged_params(id, params), visible: true })
 }
 
+/// The keys and documented ranges of an effect's parameter description
+/// (`{key: unit (lo..hi, default), other?: …}`): the top-level keys, each with its range when the
+/// first parenthesis after it starts with `lo..hi`.
+fn described_keys(doc: &str) -> Vec<(String, Option<(f64, f64)>)> {
+    let Some(body) = doc.strip_prefix('{').and_then(|d| {
+        let mut depth = 0i32;
+        d.char_indices()
+            .find_map(|(i, c)| {
+                match c {
+                    '{' | '(' | '[' => depth += 1,
+                    '}' | ')' | ']' if depth > 0 => depth -= 1,
+                    '}' => return Some(i),
+                    _ => {}
+                }
+                None
+            })
+            .map(|end| &d[..end])
+    }) else {
+        return Vec::new();
+    };
+    let (mut parts, mut depth, mut quoted, mut from) = (Vec::new(), 0i32, false, 0);
+    for (i, c) in body.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '(' | '[' | '{' if !quoted => depth += 1,
+            ')' | ']' | '}' if !quoted => depth -= 1,
+            ',' if !quoted && depth == 0 => {
+                parts.push(&body[from..i]);
+                from = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&body[from..]);
+    parts
+        .into_iter()
+        .filter_map(|part| {
+            let (key, rest) = part.split_once(':')?;
+            let key = key.trim().trim_end_matches('?').trim_matches('"');
+            if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                return None;
+            }
+            let range = rest.split_once('(').and_then(|(_, r)| {
+                let first = r.split([',', ')']).next()?.trim();
+                let (lo, hi) = first.split_once("..")?;
+                Some((lo.trim().parse::<f64>().ok()?, hi.trim().parse::<f64>().ok()?))
+            });
+            Some((key.to_string(), range))
+        })
+        .collect()
+}
+
+/// Check `params` for built-in effect `id`: every key one the effect takes (its dialog defaults or
+/// its description), of the default's type, inside its documented range (an `opacity` in 0..100).
+/// Plug-in effects and unknown ids aren't checked here.
+pub fn check_params(id: &str, params: &Value) -> Result<(), String> {
+    let (Some(info), Some(given)) = (catalog_index().get(id), params.as_object()) else { return Ok(()) };
+    let described = described_keys(info.params);
+    let defaults = info.defaults.as_object();
+    for (k, v) in given {
+        let default = defaults.and_then(|d| d.get(k));
+        let range = described.iter().find(|(d, _)| d == k).map(|(_, r)| *r);
+        if default.is_none() && range.is_none() {
+            let mut known: Vec<&str> = defaults.map(|d| d.keys().map(String::as_str).collect()).unwrap_or_default();
+            for (d, _) in &described {
+                if !known.contains(&d.as_str()) {
+                    known.push(d);
+                }
+            }
+            return Err(format!("{id} has no parameter `{k}` (it takes {})", if known.is_empty() { "none".to_string() } else { known.join(", ") }));
+        }
+        match default {
+            Some(Value::Number(_)) if !v.as_f64().is_some_and(f64::is_finite) => return Err(format!("{id}: `{k}` must be a number")),
+            Some(Value::Bool(_)) if !v.is_boolean() => return Err(format!("{id}: `{k}` must be true or false")),
+            _ => {}
+        }
+        let bounds = range.flatten().or_else(|| (k == "opacity").then_some((0.0, 100.0)));
+        if let (Some((lo, hi)), Some(x)) = (bounds, v.as_f64())
+            && !(lo..=hi).contains(&x)
+        {
+            return Err(format!("{id}: `{k}` must be {lo}..{hi} (got {x})"));
+        }
+    }
+    Ok(())
+}
+
 /// Scale the distance parameters of `e` by `s` (Scale Strokes & Effects; see
 /// [`EffectInfo::lengths`]). A distance left at its default is written out scaled; one the
 /// effect doesn't have (Outline Stroke's weight following its stroke) stays absent.
